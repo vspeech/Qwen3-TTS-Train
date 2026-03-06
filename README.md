@@ -39,7 +39,7 @@ Prepare your training file as a JSONL (one JSON object per line). Each line must
 
 ### 2.2 Data Preparation
 
-**Scenario**: Audio data from a single speaker
+Convert `train_raw.jsonl` into a training JSONL that includes `audio_codes`:
 
 ```bash
 # Prepare data
@@ -109,21 +109,21 @@ python sft_12hz.py \
   --instruct_model
 ```
 
-## 8. Best Practices Summary
+## 4. Best Practices Summary
 
-### 8.1 Data Preparation
+### 4.1 Data Preparation
 - ✅ Use meaningful file names
 - ✅ Ensure audio quality (SNR > 20dB)
 - ✅ Audio duration of 2-10 seconds is recommended
 - ✅ At least 1 hour of data for single speaker
 - ✅ At least 30 minutes per speaker for multi-speaker
 
-### 8.2 Training Configuration
+### 4.2 Training Configuration
 - ✅ Single speaker: batch_size=2, lr=2e-5, epochs=3
 - ✅ Multi-speaker: enable --multi_speaker flag
 - ✅ Small dataset: increase epochs, reduce batch_size
 
-### 8.3 Performance Optimization
+### 4.3 Performance Optimization
 - ✅ Use GPU for training
 - ✅ Enable mixed precision
 - ✅ Set batch_size appropriately
