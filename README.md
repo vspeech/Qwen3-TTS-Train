@@ -132,3 +132,8 @@ python sft_12hz.py \
 **Happy training!** 🎉
 
 With this quick start guide, you should be able to quickly get started with the Qwen3-TTS training pipeline. If you have any questions, please refer to the detailed documentation or try adjusting parameters.
+
+## Acknowledgement
+This repo is directly based on the following excellent project:
+ 
+- [**Qwen3-TTS**](https://github.com/QwenLM/Qwen3-TTS)
