@@ -53,6 +53,10 @@ def train():
     parser.add_argument("--speaker_field", type=str, default="speaker", help="Field name for speaker in JSONL")
     parser.add_argument("--max_speakers", type=int, default=1000, help="Maximum number of supported speakers")
     parser.add_argument("--start_spk_id", type=int, default=3000, help="Starting index for speaker spk_id")
+    # no speaker params
+    parser.add_argument("--no_speaker", action="store_true",
+                        help="Train without speaker embedding. No ref_audio needed in JSONL. "
+                             "The model will not learn speaker identity, only language/dialect/style features.")
     # instruct params
     parser.add_argument("--instruct_model", action="store_true", help="Whether to use instruct training mode")
     parser.add_argument("--instruct_field", type=str, default="instruct", help="Field name for instruction in JSONL")
@@ -183,8 +187,8 @@ def train():
             print(f"Detected {len(languages)} languages: {languages}")
 
     
-    # Initialize dataset, pass speaker_field and dialect_field parameters
-    dataset = TTSDataset(train_data, qwen3tts.processor, config, speaker_field=args.speaker_field, dialect_field=args.dialect_field)
+    # Initialize dataset, pass speaker_field, dialect_field, and no_speaker parameters
+    dataset = TTSDataset(train_data, qwen3tts.processor, config, speaker_field=args.speaker_field, dialect_field=args.dialect_field, no_speaker=args.no_speaker)
     train_dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=dataset.collate_fn)
 
     optimizer = AdamW(qwen3tts.model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -202,8 +206,6 @@ def train():
 
                 input_ids = batch['input_ids']
                 codec_ids = batch['codec_ids']
-                ref_mels = batch['ref_mels']
-                ref_mel_lengths = batch['ref_mel_lengths']
                 text_embedding_mask = batch['text_embedding_mask']
                 codec_embedding_mask = batch['codec_embedding_mask']
                 attention_mask = batch['attention_mask']
@@ -213,42 +215,44 @@ def train():
                 languages_batch = batch.get('languages', [args.default_language] * len(input_ids))
  
 
-                #speaker_embedding = model.speaker_encoder(ref_mels.to(model.device).to(model.dtype)).detach()
-                speaker_embedding = model.speaker_encoder(ref_mels.to(model.device).to(model.dtype), lengths=ref_mel_lengths).detach()
+                if not args.no_speaker:
+                    ref_mels = batch['ref_mels']
+                    ref_mel_lengths = batch['ref_mel_lengths']
+                    #speaker_embedding = model.speaker_encoder(ref_mels.to(model.device).to(model.dtype)).detach()
+                    speaker_embedding = model.speaker_encoder(ref_mels.to(model.device).to(model.dtype), lengths=ref_mel_lengths).detach()
 
-                # Multi-speaker training: accumulate embeddings for averaging
-                if args.multi_speaker and speakers:
-                    for i, speaker in enumerate(speakers_batch):
-                        emb = speaker_embedding[i:i+1].detach()
-                        if speaker not in speaker_embeddings_sum:
-                            speaker_embeddings_sum[speaker] = emb.clone()
-                            speaker_embeddings_count[speaker] = 1
-                        else:
-                            speaker_embeddings_sum[speaker] += emb
-                            speaker_embeddings_count[speaker] += 1
-                        # Keep latest for compatibility (will use average when saving)
-                        speaker_embeddings[speaker] = emb
-                else:
-                    # Single-speaker training: accumulate for averaging
-                    emb = speaker_embedding.mean(dim=0, keepdim=True).detach()
-                    if target_speaker_embedding_sum is None:
-                        target_speaker_embedding_sum = emb.clone()
-                        target_speaker_embedding_count = 1
+                    # Multi-speaker training: accumulate embeddings for averaging
+                    if args.multi_speaker and speakers:
+                        for i, speaker in enumerate(speakers_batch):
+                            emb = speaker_embedding[i:i+1].detach()
+                            if speaker not in speaker_embeddings_sum:
+                                speaker_embeddings_sum[speaker] = emb.clone()
+                                speaker_embeddings_count[speaker] = 1
+                            else:
+                                speaker_embeddings_sum[speaker] += emb
+                                speaker_embeddings_count[speaker] += 1
+                            # Keep latest for compatibility (will use average when saving)
+                            speaker_embeddings[speaker] = emb
                     else:
-                        target_speaker_embedding_sum += emb
-                        target_speaker_embedding_count += 1
-                    target_speaker_embedding = emb  # keep latest for compatibility
+                        # Single-speaker training: accumulate for averaging
+                        emb = speaker_embedding.mean(dim=0, keepdim=True).detach()
+                        if target_speaker_embedding_sum is None:
+                            target_speaker_embedding_sum = emb.clone()
+                            target_speaker_embedding_count = 1
+                        else:
+                            target_speaker_embedding_sum += emb
+                            target_speaker_embedding_count += 1
+                        target_speaker_embedding = emb  # keep latest for compatibility
 
                 input_text_ids = input_ids[:, :, 0]
                 input_codec_ids = input_ids[:, :, 1]
 
                 input_text_embedding = model.talker.model.text_embedding(input_text_ids) * text_embedding_mask
                 input_codec_embedding = model.talker.model.codec_embedding(input_codec_ids) * codec_embedding_mask
-                input_codec_embedding[:, 7, :] = speaker_embedding
-                # Inject language/dialect embedding at position 5
-                # This matches modeling_qwen3_tts.py lines 2135-2148:
-                #   codec_prefill_list = [[think_id, think_bos_id, language_id, think_eos_id]]
-                #   → language_id is at index 2, which maps to position 5 in global coords
+                if not args.no_speaker:
+                    for i, language in enumerate(languages_batch):
+                        spk_pos = 7 if language.lower() != "auto" else 6
+                        input_codec_embedding[i, spk_pos, :] = speaker_embedding[i]
                 codec_language_id_config = getattr(config.talker_config, 'codec_language_id', None) or {}
                 dialects_batch = batch.get('dialects', [None] * len(input_ids))
                 for i, language in enumerate(languages_batch):
@@ -259,7 +263,6 @@ def train():
                             raise NotImplementedError(f"Language {language} not implemented in codec_language_id: {codec_language_id_config}")
                         language_id = codec_language_id_config[language.lower()]
 
-                    # Step 2: Dialect override (takes priority over language)
                     if args.multi_dialect:
                         # Multi-dialect: use per-sample dialect field
                         sample_dialect = dialects_batch[i]
@@ -341,41 +344,42 @@ def train():
 
             talker_config = config_dict.get("talker_config", {})
             
-            # Multi-speaker config logic
-            if args.multi_speaker and speakers:
-                spk_id_mapping = {}
-                spk_dialect_mapping = {}
-                for i, speaker in enumerate(speakers):
-                    spk_id = args.start_spk_id + i
-                    spk_id_mapping[speaker] = spk_id
-                    # Determine dialect for this speaker
-                    if args.multi_dialect:
-                        # Use per-speaker dialect from data
-                        spk_dialect_mapping[speaker] = spk_dialect_map.get(speaker, False)
-                    elif args.dialect is not None:
-                        # Single dialect: all speakers share the same dialect
-                        spk_dialect_mapping[speaker] = args.dialect
-                    else:
-                        spk_dialect_mapping[speaker] = False
-                
-                talker_config["spk_id"].update(spk_id_mapping)
-                talker_config["spk_is_dialect"].update(spk_dialect_mapping)
-            else:
-                talker_config["spk_id"].update({
-                    args.speaker_name: args.start_spk_id
-                })
-                if args.multi_dialect:
-                    talker_config["spk_is_dialect"].update({
-                        args.speaker_name: spk_dialect_map.get(args.speaker_name, False)
-                    })
-                elif args.dialect is not None:
-                    talker_config["spk_is_dialect"].update({
-                        args.speaker_name: args.dialect
-                    })
+            # Multi-speaker config logic (skip when no_speaker mode)
+            if not args.no_speaker:
+                if args.multi_speaker and speakers:
+                    spk_id_mapping = {}
+                    spk_dialect_mapping = {}
+                    for i, speaker in enumerate(speakers):
+                        spk_id = args.start_spk_id + i
+                        spk_id_mapping[speaker] = spk_id
+                        # Determine dialect for this speaker
+                        if args.multi_dialect:
+                            # Use per-speaker dialect from data
+                            spk_dialect_mapping[speaker] = spk_dialect_map.get(speaker, False)
+                        elif args.dialect is not None:
+                            # Single dialect: all speakers share the same dialect
+                            spk_dialect_mapping[speaker] = args.dialect
+                        else:
+                            spk_dialect_mapping[speaker] = False
+                    
+                    talker_config["spk_id"].update(spk_id_mapping)
+                    talker_config["spk_is_dialect"].update(spk_dialect_mapping)
                 else:
-                    talker_config["spk_is_dialect"].update({
-                        args.speaker_name: False
+                    talker_config["spk_id"].update({
+                        args.speaker_name: args.start_spk_id
                     })
+                    if args.multi_dialect:
+                        talker_config["spk_is_dialect"].update({
+                            args.speaker_name: spk_dialect_map.get(args.speaker_name, False)
+                        })
+                    elif args.dialect is not None:
+                        talker_config["spk_is_dialect"].update({
+                            args.speaker_name: args.dialect
+                        })
+                    else:
+                        talker_config["spk_is_dialect"].update({
+                            args.speaker_name: False
+                        })
             
             if args.multi_language and languages:
                 codec_language_mapping = {}
@@ -388,7 +392,7 @@ def train():
             # Write dialect -> token_id mappings to codec_language_id
             if dialect_id_mapping:
                 talker_config["codec_language_id"].update(dialect_id_mapping)
-            elif args.dialect is None and not args.multi_dialect and not (args.multi_language and languages):
+            elif args.dialect is None and not args.multi_dialect and not (args.multi_language and languages) and args.default_language.lower() != "auto":
                 talker_config["codec_language_id"].update({
                     args.default_language.lower(): args.start_lang_id
                 })
@@ -408,20 +412,23 @@ def train():
 
             weight = state_dict['talker.model.codec_embedding.weight']
             
-            # Multi-speaker embedding storage logic: use average embedding
-            if args.multi_speaker and speakers:
-                for i, speaker in enumerate(speakers):
-                    spk_id = args.start_spk_id + i
-                    if speaker in speaker_embeddings_sum:
-                        avg_emb = speaker_embeddings_sum[speaker] / speaker_embeddings_count[speaker]
-                        state_dict['talker.model.codec_embedding.weight'][spk_id] = avg_emb[0].to(weight.device).to(weight.dtype)
-                        accelerator.print(f"Speaker '{speaker}' (spk_id={spk_id}): saved average embedding from {speaker_embeddings_count[speaker]} samples")
+            # Multi-speaker embedding storage logic: use average embedding (skip when no_speaker mode)
+            if not args.no_speaker:
+                if args.multi_speaker and speakers:
+                    for i, speaker in enumerate(speakers):
+                        spk_id = args.start_spk_id + i
+                        if speaker in speaker_embeddings_sum:
+                            avg_emb = speaker_embeddings_sum[speaker] / speaker_embeddings_count[speaker]
+                            state_dict['talker.model.codec_embedding.weight'][spk_id] = avg_emb[0].to(weight.device).to(weight.dtype)
+                            accelerator.print(f"Speaker '{speaker}' (spk_id={spk_id}): saved average embedding from {speaker_embeddings_count[speaker]} samples")
+                else:
+                    # Single-speaker embedding storage: use average embedding
+                    if target_speaker_embedding_sum is not None and target_speaker_embedding_count > 0:
+                        avg_emb = target_speaker_embedding_sum / target_speaker_embedding_count
+                        state_dict['talker.model.codec_embedding.weight'][args.start_spk_id] = avg_emb[0].to(weight.device).to(weight.dtype)
+                        accelerator.print(f"Single speaker (spk_id={args.start_spk_id}): saved average embedding from {target_speaker_embedding_count} batches")
             else:
-                # Single-speaker embedding storage: use average embedding
-                if target_speaker_embedding_sum is not None and target_speaker_embedding_count > 0:
-                    avg_emb = target_speaker_embedding_sum / target_speaker_embedding_count
-                    state_dict['talker.model.codec_embedding.weight'][args.start_spk_id] = avg_emb[0].to(weight.device).to(weight.dtype)
-                    accelerator.print(f"Single speaker (spk_id={args.start_spk_id}): saved average embedding from {target_speaker_embedding_count} batches")
+                accelerator.print("No-speaker mode: skipping speaker embedding storage")
             
             save_path = os.path.join(output_dir, "model.safetensors")
             save_file(state_dict, save_path)

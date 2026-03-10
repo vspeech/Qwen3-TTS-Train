@@ -32,13 +32,14 @@ AudioLike = Union[
 MaybeList = Union[Any, List[Any]]
 
 class TTSDataset(Dataset):
-    def __init__(self, data_list, processor, config:Qwen3TTSConfig, lag_num = -1, speaker_field="speaker", dialect_field="dialect"):
+    def __init__(self, data_list, processor, config:Qwen3TTSConfig, lag_num = -1, speaker_field="speaker", dialect_field="dialect", no_speaker=False):
         self.data_list = data_list
         self.processor = processor
         self.lag_num = lag_num
         self.config = config
         self.speaker_field = speaker_field
         self.dialect_field = dialect_field
+        self.no_speaker = no_speaker
 
     def __len__(self):
         return len(self.data_list)
@@ -129,11 +130,10 @@ class TTSDataset(Dataset):
         text        = item["text"]
         audio_codes = item["audio_codes"]
         language        = item.get('language','Auto')
-        ref_audio_path  = item['ref_audio']
         
         instruct = item.get('instruct', '')
         
-        speaker = item.get(self.speaker_field, 'default_speaker')
+        speaker = item.get(self.speaker_field, 'default_speaker') if not self.no_speaker else None
         
         dialect = item.get(self.dialect_field, None)
 
@@ -146,11 +146,14 @@ class TTSDataset(Dataset):
 
         audio_codes = torch.tensor(audio_codes, dtype=torch.long)
 
-        ref_audio_list = self._ensure_list(ref_audio_path)
-        normalized = self._normalize_audio_inputs(ref_audio_list)
-        wav,sr = normalized[0]
-
-        ref_mel = self.extract_mels(audio=wav, sr=sr)
+        # Extract ref_mel only when speaker mode is enabled
+        ref_mel = None
+        if not self.no_speaker:
+            ref_audio_path = item['ref_audio']
+            ref_audio_list = self._ensure_list(ref_audio_path)
+            normalized = self._normalize_audio_inputs(ref_audio_list)
+            wav, sr = normalized[0]
+            ref_mel = self.extract_mels(audio=wav, sr=sr)
 
         return {
             "text_ids": text_ids[:,:-5],    # 1 , t
@@ -165,7 +168,16 @@ class TTSDataset(Dataset):
         assert self.lag_num == -1
 
         item_length = [b['text_ids'].shape[1] + b['audio_codes'].shape[0] for b in batch]
-        prefix_offset = [9 if b['language'] != 'Auto' else 8 for b in batch]
+        # prefix_offset depends on language and whether speaker is present
+        # With speaker:    language!=Auto -> P=9, Auto -> P=8
+        # Without speaker:  language!=Auto -> P=8, Auto -> P=7
+        def _get_prefix_offset(b):
+            has_spk = not self.no_speaker
+            if b['language'] != 'Auto':
+                return 9 if has_spk else 8
+            else:
+                return 8 if has_spk else 7
+        prefix_offset = [_get_prefix_offset(b) for b in batch]
         item_lengths = [a + b for a, b in zip(item_length, prefix_offset)]
         max_length = max(item_lengths)
         #max_length = max(item_length) + 9
@@ -192,29 +204,57 @@ class TTSDataset(Dataset):
             text_ids_len = text_ids.shape[1]
             codec_ids_len = audio_codec_0.shape[0]
 
+            has_spk = not self.no_speaker
             if language != 'Auto':
-                P = 9 # prefix offset (first text token position)
-                num_tts_pad = 5  # positions 4,5,6,7,8
-                codec_prefix = torch.tensor([
-                    self.config.talker_config.codec_think_id,
-                    self.config.talker_config.codec_think_bos_id,
-                    0,
-                    self.config.talker_config.codec_think_eos_id,
-                    0,
-                    self.config.talker_config.codec_pad_id,
-                ])
-                language_mask_pos = 5
+                if has_spk:
+                    P = 9 # prefix offset (first text token position)
+                    num_tts_pad = 5 
+                    codec_prefix = torch.tensor([
+                        self.config.talker_config.codec_think_id,
+                        self.config.talker_config.codec_think_bos_id,
+                        0,  # language_id placeholder
+                        self.config.talker_config.codec_think_eos_id,
+                        0,  # speaker placeholder 
+                        self.config.talker_config.codec_pad_id,
+                    ])
+                    language_mask_pos = 5   
+                    speaker_mask_pos = 7   
+                else:
+                    P = 8 # no speaker position
+                    num_tts_pad = 4  
+                    codec_prefix = torch.tensor([
+                        self.config.talker_config.codec_think_id,
+                        self.config.talker_config.codec_think_bos_id,
+                        0,  # language_id placeholder
+                        self.config.talker_config.codec_think_eos_id,
+                        self.config.talker_config.codec_pad_id,
+                    ])
+                    language_mask_pos = 5   
+                    speaker_mask_pos = None 
             else:
-                P = 8
-                num_tts_pad = 4
-                codec_prefix = torch.tensor([
-                    self.config.talker_config.codec_nothink_id,
-                    self.config.talker_config.codec_think_bos_id,
-                    self.config.talker_config.codec_think_eos_id,
-                    0,
-                    self.config.talker_config.codec_pad_id,
-                ])
-                language_mask_pos = None
+                if has_spk:
+                    P = 8
+                    num_tts_pad = 4
+                    codec_prefix = torch.tensor([
+                        self.config.talker_config.codec_nothink_id,
+                        self.config.talker_config.codec_think_bos_id,
+                        self.config.talker_config.codec_think_eos_id,
+                        0,  # speaker placeholder
+                        self.config.talker_config.codec_pad_id,
+                    ])
+                    language_mask_pos = None
+                    speaker_mask_pos = 6 
+                else:
+                    P = 7
+                    num_tts_pad = 3
+                    codec_prefix = torch.tensor([
+                        self.config.talker_config.codec_nothink_id,
+                        self.config.talker_config.codec_think_bos_id,
+                        self.config.talker_config.codec_think_eos_id,
+                        self.config.talker_config.codec_pad_id,
+                    ])
+                    language_mask_pos = None
+                    speaker_mask_pos = None
             
             # text channel
             input_ids[i,  :3, 0] = text_ids[0,:3]
@@ -240,20 +280,23 @@ class TTSDataset(Dataset):
 
             text_embedding_mask[i,  :P+text_ids_len+codec_ids_len] = True
             codec_embedding_mask[i, 3:P+text_ids_len+codec_ids_len] = True
+            # Mask out positions that will be overwritten by custom embeddings
             if language_mask_pos is not None:
                 codec_embedding_mask[i, language_mask_pos] = False
-                codec_embedding_mask[i, 7] = False  
-            else:
-                codec_embedding_mask[i, 6] = False
+            if speaker_mask_pos is not None:
+                codec_embedding_mask[i, speaker_mask_pos] = False
 
             codec_mask[i,   P+text_ids_len-1:P+text_ids_len-1+codec_ids_len] = True
             attention_mask[i, :P+text_ids_len+codec_ids_len] = True
         
-        ref_mels = [data['ref_mel'].squeeze(0) for data in batch]
-        ref_mel_lengths = torch.tensor([data['ref_mel'].size(1) for data in batch], dtype=torch.int32)
-        ref_mels = pad_sequence(ref_mels, batch_first=True, padding_value=0)
-        #ref_mels = [data['ref_mel'] for data in batch]
-        #ref_mels = torch.cat(ref_mels,dim=0)
+        # Build ref_mels only when speaker mode is enabled
+        if not self.no_speaker:
+            ref_mels = [data['ref_mel'].squeeze(0) for data in batch]
+            ref_mel_lengths = torch.tensor([data['ref_mel'].size(1) for data in batch], dtype=torch.int32)
+            ref_mels = pad_sequence(ref_mels, batch_first=True, padding_value=0)
+        else:
+            ref_mels = None
+            ref_mel_lengths = None
 
         return {
             'input_ids':input_ids,

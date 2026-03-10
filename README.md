@@ -68,6 +68,12 @@ python sft_12hz.py \
 
 ### 3.2 Multi-Speaker Training
 
+Example:
+```jsonl
+{"audio":"./data/utt0001.wav","text":"其实我真的有发现，我是一个特别善于观察别人情绪的人。","ref_audio":"./data/utt0001.wav","speaker":"spk1"}
+{"audio":"./data/utt0002.wav","text":"他要大家仔细听听湖边群山送过来的回音。","ref_audio":"./data/utt0002.wav","speaker":"spk2"}
+```
+
 ```bash
 # Multi-speaker training
 python sft_12hz.py \
@@ -81,6 +87,12 @@ python sft_12hz.py \
 ```
 
 ### 3.3 Multi-Language Training
+
+Example:
+```jsonl
+{"audio":"./data/utt0001.wav","text":"其实我真的有发现，我是一个特别善于观察别人情绪的人。","ref_audio":"./data/utt0001.wav","speaker":"spk1","language":"Chinese"}
+{"audio":"./data/utt0002.wav","text":"She said she would be here by noon.","ref_audio":"./data/utt0002.wav","speaker":"spk2","language":"English"}
+```
 
 ```bash
 # Multi-language training
@@ -97,6 +109,11 @@ python sft_12hz.py \
 
 ### 3.3 Instruct Training
 
+Example:
+```jsonl
+{"audio":"./data/utt0001.wav","text":"其实我真的有发现，我是一个特别善于观察别人情绪的人。","ref_audio":"./data/utt0001.wav","instruct":"用特别愤怒的语气说"}
+```
+
 ```bash
 # Instruct training
 python sft_12hz.py \
@@ -109,17 +126,35 @@ python sft_12hz.py \
   --instruct_model
 ```
 
+### 3.4 No Speaker and No Language Training
+
+Example:
+```jsonl
+{"audio":"./data/utt0001.wav","text":"其实我真的有发现，我是一个特别善于观察别人情绪的人。"}
+{"audio":"./data/utt0002.wav","text":"他要大家仔细听听湖边群山送过来的回音。"}
+```
+
+```bash
+python sft_12hz.py \
+  --init_model_path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --output_model_path instruct_output \
+  --train_jsonl train_with_codes.jsonl \
+  --batch_size 32 \
+  --lr 2e-6 \
+  --num_epochs 10 \
+  --no_speaker
+```
+
 ## 4. Best Practices Summary
 
 ### 4.1 Data Preparation
-- ✅ Use meaningful file names
 - ✅ Ensure audio quality (SNR > 20dB)
 - ✅ Audio duration of 2-10 seconds is recommended
 - ✅ At least 1 hour of data for single speaker
 - ✅ At least 30 minutes per speaker for multi-speaker
 
 ### 4.2 Training Configuration
-- ✅ Single speaker: batch_size=2, lr=2e-5, epochs=3
+- ✅ Single speaker: batch_size=2, lr=2e-6, epochs=3
 - ✅ Multi-speaker: enable --multi_speaker flag
 - ✅ Small dataset: increase epochs, reduce batch_size
 
