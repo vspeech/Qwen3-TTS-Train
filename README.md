@@ -145,6 +145,27 @@ python sft_12hz.py \
   --no_speaker
 ```
 
+### 3.5 Continued Pre-Training
+
+Example:
+```jsonl
+{"audio":"./data/utt0001.wav","text":"其实我真的有发现，我是一个特别善于观察别人情绪的人。","ref_audio":"./data/spk1.wav","speaker":"spk1","language":"Chinese"}
+{"audio":"./data/utt0002.wav","text":"他要大家仔细听听湖边群山送过来的回音。","ref_audio":"./data/spk2.wav","speaker":"spk2","language":"Chinese"}
+```
+
+```bash
+accelerate launch pretrain_12hz.py \
+    --init_model_path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+    --train_jsonl /path/to/large_scale_data.jsonl \
+    --output_model_path /path/to/output \
+    --batch_size 4 \
+    --lr 1e-4 \
+    --num_epochs 10 \
+    --warmup_steps 1000 \
+    --gradient_checkpointing \
+    --save_steps 5000
+```
+
 ## 4. Best Practices Summary
 
 ### 4.1 Data Preparation
