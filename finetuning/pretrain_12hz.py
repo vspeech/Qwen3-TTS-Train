@@ -17,16 +17,6 @@
 """
 Qwen3-TTS 12Hz Pre-training Script
 
-This script is designed for pre-training (or continued pre-training) of the
-Qwen3-TTS base model. Unlike the SFT script (sft_12hz.py), this script:
-  1. Trains ALL parameters (talker + speaker_encoder)
-  2. speaker_encoder participates in gradient computation (no .detach())
-  3. Saves all weights including speaker_encoder
-  4. Uses cosine learning rate scheduler with warmup
-  5. Supports gradient checkpointing for memory efficiency
-  6. Preserves "base" model type in config
-  7. Does not register specific spk_id mappings
-
 Usage:
     accelerate launch pretrain_12hz.py \
         --init_model_path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
